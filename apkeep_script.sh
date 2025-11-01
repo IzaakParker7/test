@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# apkeep_compatible.sh - Download and install compatible APKs via apkeep with auto-fallback.
+# apkeep_script.sh - Download and install compatible APKs via apkeep with auto-fallback.
 #
 # Examples:
-#   ./apkeep_compatible.sh com.instagram.android
-#   ./apkeep_compatible.sh com.instagram.android@1.2024.321 ./ig
-#   ./apkeep_compatible.sh com.app . --abi armeabi-v7a,armeabi --min-sdk 26 --verbose
-#   ./apkeep_compatible.sh com.soundcloud.android . --max-tries 5
-#   ./apkeep_compatible.sh com.whatsapp . --dry
+#   ./apkeep_script.sh com.instagram.android
+#   ./apkeep_script.sh com.instagram.android@1.2024.321 ./ig
+#   ./apkeep_script.sh com.app . --abi armeabi-v7a,armeabi --min-sdk 26 --verbose
+#   ./apkeep_script.sh com.soundcloud.android . --max-tries 5
+#   ./apkeep_script.sh com.whatsapp . --dry
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -19,7 +19,7 @@ log_verbose(){ (( VERBOSE )) && echo "[v] $*"; }
 
 usage(){
   cat <<USAGE
-Usage: apkeep_compatible.sh <package[@version]> [output_dir]
+Usage: apkeep_script.sh <package[@version]> [output_dir]
   [--source apk-pure|apk-mirror]
   [--abi list,of,abis]
   [--min-sdk N]
@@ -279,10 +279,50 @@ check_minsdk(){
   fi
 }
 
+is_base_apk(){
+  local apk="$1"
+  local name
+  name=$(basename "$apk")
+
+  if (( HAVE_AAPT )); then
+    local badging
+    if badging=$(aapt dump badging "$apk" 2>/dev/null); then
+      if grep -q " split=" <<<"$badging"; then
+        return 1
+      fi
+      if grep -q " isFeatureSplit=" <<<"$badging"; then
+        return 1
+      fi
+      return 0
+    fi
+  fi
+
+  if [[ $name == "base.apk" || $name == "$PKG_NAME.apk" ]]; then
+    return 0
+  fi
+  if [[ $name == split_config.* || $name == config.* ]]; then
+    return 1
+  fi
+  if [[ $name == *_config.*.apk ]]; then
+    return 1
+  fi
+  return 0
+}
+
 compatible_set(){
   COMPATIBLE_APKS=()
+  BASE_STATUS=""
+  BASE_APK=""
+  BASE_OK=0
+  local base_identified=0
   local apk
   for apk in "${FOUND_APKS[@]}"; do
+    local is_base=0
+    if is_base_apk "$apk"; then
+      is_base=1
+      base_identified=1
+      BASE_APK="$apk"
+    fi
     check_abi "$apk"
     local abi_ok=$?
     check_minsdk "$apk"
@@ -290,8 +330,16 @@ compatible_set(){
     printf '  - %s : %s; %s\n' "$(basename "$apk")" "$ABI_STATUS" "$MINSDK_STATUS"
     if (( abi_ok == 0 && sdk_ok == 0 )); then
       COMPATIBLE_APKS+=("$apk")
+      if (( is_base )); then
+        BASE_OK=1
+      fi
     fi
   done
+  if (( base_identified == 0 )); then
+    BASE_STATUS="[-] Unable to identify a base APK in the downloaded package set."
+  elif (( BASE_OK == 0 )); then
+    BASE_STATUS="[-] Base APK $(basename "$BASE_APK") failed compatibility checks."
+  fi
   return 0
 }
 
@@ -352,7 +400,10 @@ run_attempt(){
     exit 2
   fi
   compatible_set
-  if ((${#COMPATIBLE_APKS[@]} == 0)); then
+  if [[ -n $BASE_STATUS ]]; then
+    echo "$BASE_STATUS" >&2
+  fi
+  if ((${#COMPATIBLE_APKS[@]} == 0)) || (( BASE_OK == 0 )); then
     echo "[-] Version $label incompatible, trying next…"
     return 1
   fi
